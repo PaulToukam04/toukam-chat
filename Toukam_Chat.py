@@ -5,6 +5,8 @@ import re
 import smtplib
 import random
 import sqlite3
+import uuid
+from urllib.parse import quote, unquote
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
@@ -45,6 +47,49 @@ st.markdown("""
 AVATAR_ETUDIANT = "user"
 AVATAR_TOUKAM = "assistant"
 
+# --- MÉMORISATION DES IDENTIFIANTS DANS LE NAVIGATEUR (cookies, aucune saisie côté serveur) ---
+# Permet de ne plus avoir à re-saisir son e-mail / code secret à chaque ouverture de l'application,
+# tant que c'est le même navigateur sur le même appareil (rien n'est stocké ailleurs).
+
+def _lire_cookie(nom, defaut=""):
+    try:
+        valeur = st.context.cookies.get(nom)
+    except Exception:
+        valeur = None
+    if not valeur:
+        return defaut
+    try:
+        return unquote(valeur)
+    except Exception:
+        return defaut
+
+
+def _memoriser_cookie(nom, valeur, jours=365):
+    """Écrit une valeur dans un cookie du navigateur (persistant plusieurs mois)."""
+    valeur_encodee = quote((valeur or "").strip())
+    st.markdown(
+        f'<script>document.cookie = "{nom}={valeur_encodee}; path=/; max-age={jours * 86400}; SameSite=Lax";</script>',
+        unsafe_allow_html=True,
+    )
+
+
+def _effacer_cookie(nom):
+    st.markdown(
+        f'<script>document.cookie = "{nom}=; path=/; max-age=0";</script>',
+        unsafe_allow_html=True,
+    )
+
+
+def _obtenir_identifiant_appareil():
+    """Identifiant anonyme unique par navigateur/appareil, utilisé UNIQUEMENT pour empêcher
+    de contourner les quotas gratuits en changeant d'e-mail. Généré une seule fois puis conservé
+    dans un cookie (5 ans), indépendamment de la case « Se souvenir de moi »."""
+    identifiant = _lire_cookie("toukam_appareil")
+    if not identifiant:
+        identifiant = "appareil_" + uuid.uuid4().hex
+        _memoriser_cookie("toukam_appareil", identifiant, jours=1825)
+    return identifiant
+
 # --- PERSISTANCE DES QUOTAS SANS TRICHE (SQLite3) ---
 DB_FILE = "toukam_data.db"
 
@@ -69,33 +114,53 @@ def initialiser_bdd():
     conn.commit()
     conn.close()
 
-def recuperer_quotas(email):
-    if not email:
+def recuperer_quotas(cle):
+    """Lit le quota associé à une clé (peut être un e-mail ou un identifiant d'appareil)."""
+    if not cle:
         return {"images": 0, "pdf_conv": 0}
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    cursor.execute("SELECT images_utilisees, pdf_telecharges FROM quotas WHERE email = ?", (email.strip().lower(),))
+    cursor.execute("SELECT images_utilisees, pdf_telecharges FROM quotas WHERE email = ?", (cle.strip().lower(),))
     row = cursor.fetchone()
     conn.close()
     if row:
         return {"images": row[0], "pdf_conv": row[1]}
     return {"images": 0, "pdf_conv": 0}
 
-def incrementer_quota(email, type_quota):
-    if not email:
+def incrementer_quota(cle, type_quota):
+    """Incrémente le quota associé à une clé (e-mail ou identifiant d'appareil)."""
+    if not cle:
         return
     conn = sqlite3.connect(DB_FILE)
     cursor = conn.cursor()
-    email_p = email.strip().lower()
-    cursor.execute("INSERT OR IGNORE INTO quotas (email, images_utilisees, pdf_telecharges) VALUES (?, 0, 0)", (email_p,))
+    cle_p = cle.strip().lower()
+    cursor.execute("INSERT OR IGNORE INTO quotas (email, images_utilisees, pdf_telecharges) VALUES (?, 0, 0)", (cle_p,))
     if type_quota == "images":
-        cursor.execute("UPDATE quotas SET images_utilisees = images_utilisees + 1 WHERE email = ?", (email_p,))
+        cursor.execute("UPDATE quotas SET images_utilisees = images_utilisees + 1 WHERE email = ?", (cle_p,))
     elif type_quota == "pdf_conv":
-        cursor.execute("UPDATE quotas SET pdf_telecharges = pdf_telecharges + 1 WHERE email = ?", (email_p,))
+        cursor.execute("UPDATE quotas SET pdf_telecharges = pdf_telecharges + 1 WHERE email = ?", (cle_p,))
     conn.commit()
     conn.close()
 
 initialiser_bdd()
+
+def obtenir_quotas_anti_triche(email, device_id):
+    """Combine le quota lié à l'e-mail et celui lié à l'appareil (cookie anonyme non modifiable
+    par l'utilisateur), et retient le PLUS ÉLEVÉ des deux. Ainsi, changer d'e-mail sur le même
+    appareil (ou changer d'appareil en gardant le même e-mail) ne permet plus de réinitialiser
+    son quota gratuit."""
+    q_email = recuperer_quotas(email)
+    q_device = recuperer_quotas(device_id)
+    return {
+        "images": max(q_email["images"], q_device["images"]),
+        "pdf_conv": max(q_email["pdf_conv"], q_device["pdf_conv"]),
+    }
+
+def incrementer_quota_anti_triche(email, device_id, type_quota):
+    """Incrémente le compteur à la fois pour l'e-mail et pour l'appareil, pour que le quota
+    reste bloqué même si l'utilisateur change ensuite d'e-mail ou de navigateur."""
+    incrementer_quota(email, type_quota)
+    incrementer_quota(device_id, type_quota)
 
 def enregistrer_cle_utilisateur(email, cle_api):
     """Enregistre (ou remplace) la clé API personnelle de l'utilisateur, de façon permanente."""
@@ -508,11 +573,32 @@ with st.sidebar:
         sujets = st.text_area("Matières et chapitres")
         
     st.divider()
-    email_user = st.text_input("Votre e-mail de connexion", value="")
-    code_saisi = st.text_input("Entrez votre code secret", type="password")
+    souvenir = st.checkbox(
+        "💾 Se souvenir de moi sur cet appareil",
+        value=_lire_cookie("toukam_souvenir", "1") == "1",
+        help="Ton e-mail et ton code seront retenus dans ce navigateur : plus besoin de les retaper à chaque visite.",
+    )
+
+    if "email_user" not in st.session_state:
+        st.session_state.email_user = _lire_cookie("toukam_email") if souvenir else ""
+    if "code_saisi" not in st.session_state:
+        st.session_state.code_saisi = _lire_cookie("toukam_code") if souvenir else ""
+
+    email_user = st.text_input("Votre e-mail de connexion", key="email_user")
+    code_saisi = st.text_input("Entrez votre code secret", type="password", key="code_saisi")
+
+    if souvenir:
+        _memoriser_cookie("toukam_email", email_user)
+        _memoriser_cookie("toukam_code", code_saisi)
+        _memoriser_cookie("toukam_souvenir", "1")
+    else:
+        _effacer_cookie("toukam_email")
+        _effacer_cookie("toukam_code")
+        _memoriser_cookie("toukam_souvenir", "0")
     
     est_premium = False
-    quotas_actuels = recuperer_quotas(email_user)
+    device_id = _obtenir_identifiant_appareil()
+    quotas_actuels = obtenir_quotas_anti_triche(email_user, device_id)
     
     if email_user.strip() and code_saisi.strip():
         email_propre = email_user.strip().lower()
@@ -555,7 +641,7 @@ with st.sidebar:
             if cle_deja_enregistree:
                 st.success(f"✅ Clé enregistrée : ...{cle_deja_enregistree[-4:]}")
             nouvelle_cle = st.text_input(
-                "Ta clé API  (clé Google AI Studio)",
+                "Ta clé API Gemini (clé Google AI Studio)",
                 type="password",
                 key="champ_cle_perso"
             )
@@ -682,7 +768,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
             up_img.seek(0)
             inputs.append(Image.open(up_img))
             if not est_premium:
-                incrementer_quota(email_user, "images")
+                incrementer_quota_anti_triche(email_user, device_id, "images")
         except Exception as e:
             st.error(f"Erreur lors de la lecture de l'image : {e}")
             
@@ -766,7 +852,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
     nom_pdf = nom_fichier_depuis_titre(dernier_message_assistant.get("titre"))
 
     st.write("### 📄 Options de téléchargement")
-    quotas_actuels = recuperer_quotas(email_user)
+    quotas_actuels = obtenir_quotas_anti_triche(email_user, device_id)
     bloque_pdf = not est_premium and quotas_actuels["pdf_conv"] >= 2
     
     col1, col2 = st.columns(2)
@@ -777,7 +863,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
             pdf_bytes = generer_pdf(reponse_existante)
             if st.download_button("💾 Télécharger en PDF", data=pdf_bytes, file_name=nom_pdf, key="download_global_pdf"):
                 if not est_premium:
-                    incrementer_quota(email_user, "pdf_conv")
+                    incrementer_quota_anti_triche(email_user, device_id, "pdf_conv")
     with col2:
         if not est_premium:
             st.warning("🔒 Option E-mail réservée aux Premium.")
