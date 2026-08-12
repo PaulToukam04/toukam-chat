@@ -270,65 +270,126 @@ def convertir_exposants_indices(texte):
     return texte
 
 
-def dessiner_fraction(pdf, numerateur, denominateur, hauteur_ligne, unicode_ok=True):
-    """Dessine une fraction centrée avec une vraie barre horizontale (numérateur / trait / dénominateur),
-    à la place d'un simple '/'. La fraction occupe sa propre ligne, comme une formule mise en évidence
-    dans un manuel scolaire."""
-    if not unicode_ok:
-        numerateur = numerateur.encode('latin-1', 'replace').decode('latin-1')
-        denominateur = denominateur.encode('latin-1', 'replace').decode('latin-1')
+# --- RENDU DES FRACTIONS EN LIGNE (dans le texte, sans retour à la ligne forcé) ---
+# Les fractions sont traitées comme des "mots" à part entière dans la composition du texte :
+# elles continuent la ligne en cours, à la suite des mots qui précèdent, et ne passent à la
+# ligne suivante que si elles ne tiennent plus — exactement comme n'importe quel mot.
+_MARGE_FRACTION = 1.5          # mm de part et d'autre du numérateur/dénominateur, autour de la barre
+_ESPACE_AUTOUR_FRACTION = 1.5  # mm de "respiration" entre la fraction et les mots voisins
+_H_NUM = 4.2                   # hauteur (mm) réservée au numérateur
+_H_DEN = 4.2                   # hauteur (mm) réservée au dénominateur
+_H_ECART_BARRE = 0.8           # espace (mm) entre le texte et la barre
 
-    taille_normale = pdf.font_size_pt
-    taille_fraction = max(taille_normale * 0.9, 8)
-    marge_horizontale = 2  # mm de chaque côté du texte, autour de la barre
 
+def _mesurer_fraction(pdf, numerateur, denominateur, taille_normale):
+    """Calcule la largeur totale qu'occupera la fraction sur la ligne, sans toucher à la
+    position d'écriture courante (utilisé pour décider où faire un retour à la ligne)."""
+    taille_fraction = max(taille_normale * 0.72, 7)
     pdf.set_font_size(taille_fraction)
-    largeur_num = pdf.get_string_width(numerateur)
-    largeur_den = pdf.get_string_width(denominateur)
-    largeur_barre = max(largeur_num, largeur_den) + marge_horizontale * 2
-    largeur_page_utile = pdf.w - pdf.l_margin - pdf.r_margin
-    largeur_barre = min(largeur_barre, largeur_page_utile)
-    x_gauche = pdf.l_margin + (largeur_page_utile - largeur_barre) / 2
+    largeur_texte = max(pdf.get_string_width(numerateur), pdf.get_string_width(denominateur))
+    pdf.set_font_size(taille_normale)
+    largeur_totale = largeur_texte + _MARGE_FRACTION * 2 + _ESPACE_AUTOUR_FRACTION * 2
+    return largeur_totale, taille_fraction
 
-    # Numérateur
-    pdf.set_xy(x_gauche, pdf.get_y())
-    pdf.cell(largeur_barre, hauteur_ligne, numerateur, align="C")
-    pdf.ln(hauteur_ligne)
 
-    # Barre horizontale (le vrai trait, plutôt qu'un caractère "/")
-    y_barre = pdf.get_y() + 0.5
-    pdf.set_line_width(0.3)
-    pdf.line(x_gauche + marge_horizontale / 2, y_barre, x_gauche + largeur_barre - marge_horizontale / 2, y_barre)
-    pdf.ln(1.5)
+def _dessiner_fraction_a(pdf, x, y_haut, largeur, taille_fraction, numerateur, denominateur, taille_normale):
+    """Dessine numérateur / barre / dénominateur à une position précise (x, y_haut), en restant
+    sur la même ligne que le texte voisin (pas de saut de ligne avant/après)."""
+    pdf.set_font_size(taille_fraction)
+    pdf.set_xy(x, y_haut)
+    pdf.cell(largeur, _H_NUM, numerateur, align="C")
 
-    # Dénominateur
-    pdf.set_xy(x_gauche, pdf.get_y())
-    pdf.cell(largeur_barre, hauteur_ligne, denominateur, align="C")
-    pdf.ln(hauteur_ligne + 2)
+    y_barre = y_haut + _H_NUM + _H_ECART_BARRE * 0.5
+    pdf.set_line_width(0.25)
+    pdf.line(x + _MARGE_FRACTION, y_barre, x + largeur - _MARGE_FRACTION, y_barre)
+
+    pdf.set_xy(x, y_barre + _H_ECART_BARRE * 0.5)
+    pdf.cell(largeur, _H_DEN, denominateur, align="C")
 
     pdf.set_font_size(taille_normale)
-    pdf.set_x(pdf.l_margin)
+
+
+def _rendre_ligne(pdf, jetons, hauteur_ligne, taille_normale):
+    """Affiche une ligne composée de mots et/ou de fractions, alignés côte à côte. La hauteur de
+    la ligne s'agrandit automatiquement si elle contient une fraction, pour ne jamais chevaucher
+    la ligne suivante."""
+    contient_fraction = any(j[0] == "fraction" for j in jetons)
+    hauteur_ligne_reelle = max(hauteur_ligne, _H_NUM + _H_ECART_BARRE + _H_DEN) if contient_fraction else hauteur_ligne
+
+    if pdf.get_y() + hauteur_ligne_reelle > pdf.page_break_trigger:
+        pdf.add_page()
+
+    y_haut = pdf.get_y()
+    x = pdf.l_margin
+    pdf.set_font_size(taille_normale)
+    espace_mot = pdf.get_string_width(" ")
+
+    for i, jeton in enumerate(jetons):
+        if i > 0:
+            x += espace_mot
+        if jeton[0] == "mot":
+            _, mot, largeur = jeton
+            pdf.set_xy(x, y_haut)
+            pdf.cell(largeur, hauteur_ligne_reelle, mot, align="L")
+            x += largeur
+        else:
+            _, num, den, largeur, taille_frac = jeton
+            decalage = max((hauteur_ligne_reelle - (_H_NUM + _H_ECART_BARRE + _H_DEN)) / 2, 0)
+            _dessiner_fraction_a(pdf, x, y_haut + decalage, largeur, taille_frac, num, den, taille_normale)
+            x += largeur
+
+    pdf.set_xy(pdf.l_margin, y_haut + hauteur_ligne_reelle)
 
 
 def ecrire_avec_fractions(pdf, texte, hauteur_ligne=8, unicode_ok=True):
-    """Parcourt le texte : écrit les parties normales avec write() (retour à la ligne automatique),
-    et dessine chaque fraction repérée par un marqueur avec une vraie barre horizontale."""
-    position = 0
-    for m in _FRAC_MOTIF.finditer(texte):
-        avant = texte[position:m.start()]
-        if avant:
-            if not unicode_ok:
-                avant = avant.encode('latin-1', 'replace').decode('latin-1')
-            pdf.write(hauteur_ligne, avant)
-        # On force un retour à la ligne propre avant de dessiner la fraction sur sa propre ligne
-        pdf.ln(hauteur_ligne)
-        dessiner_fraction(pdf, m.group(1), m.group(2), hauteur_ligne, unicode_ok=unicode_ok)
-        position = m.end()
-    reste = texte[position:]
-    if reste:
-        if not unicode_ok:
-            reste = reste.encode('latin-1', 'replace').decode('latin-1')
-        pdf.write(hauteur_ligne, reste)
+    """Compose le texte ligne par ligne, comme un traitement de texte classique : chaque fraction
+    est un "mot" qui continue la ligne en cours, à la suite du texte qui la précède, et ne passe
+    à la ligne suivante que si elle ne tient plus (jamais de saut de ligne forcé avant elle)."""
+    taille_normale = pdf.font_size_pt
+    largeur_utile = pdf.w - pdf.l_margin - pdf.r_margin
+
+    def _texte_ok(t):
+        return t.encode('latin-1', 'replace').decode('latin-1') if not unicode_ok else t
+
+    for paragraphe in texte.split("\n"):
+        if paragraphe.strip() == "":
+            # Ligne vide voulue par l'IA (aération entre deux idées) : on la respecte.
+            if pdf.get_y() + hauteur_ligne > pdf.page_break_trigger:
+                pdf.add_page()
+            pdf.ln(hauteur_ligne * 0.6)
+            continue
+
+        # 1) Découpe le paragraphe en jetons : mots normaux ou fractions.
+        jetons = []
+        position = 0
+        for m in _FRAC_MOTIF.finditer(paragraphe):
+            avant = paragraphe[position:m.start()]
+            for mot in avant.split(" "):
+                if mot != "":
+                    mot_aff = _texte_ok(mot)
+                    jetons.append(("mot", mot_aff, pdf.get_string_width(mot_aff)))
+            largeur_frac, taille_frac = _mesurer_fraction(pdf, m.group(1), m.group(2), taille_normale)
+            jetons.append(("fraction", _texte_ok(m.group(1)), _texte_ok(m.group(2)), largeur_frac, taille_frac))
+            position = m.end()
+        for mot in paragraphe[position:].split(" "):
+            if mot != "":
+                mot_aff = _texte_ok(mot)
+                jetons.append(("mot", mot_aff, pdf.get_string_width(mot_aff)))
+
+        # 2) Recompose les jetons en lignes : retour à la ligne seulement quand ça ne tient plus.
+        espace_mot = pdf.get_string_width(" ")
+        ligne_courante, largeur_courante = [], 0.0
+        for jeton in jetons:
+            largeur_jeton = jeton[2] if jeton[0] == "mot" else jeton[3]
+            largeur_avec_espace = largeur_jeton + (espace_mot if ligne_courante else 0)
+            if ligne_courante and largeur_courante + largeur_avec_espace > largeur_utile:
+                _rendre_ligne(pdf, ligne_courante, hauteur_ligne, taille_normale)
+                ligne_courante, largeur_courante = [], 0.0
+                largeur_avec_espace = largeur_jeton
+            ligne_courante.append(jeton)
+            largeur_courante += largeur_avec_espace
+        if ligne_courante:
+            _rendre_ligne(pdf, ligne_courante, hauteur_ligne, taille_normale)
 
 
 def _trouver_police_unicode():
@@ -347,10 +408,50 @@ def _trouver_police_unicode():
     return None
 
 
+class _PDFToukamChat(FPDF):
+    """PDF avec un filigrane discret 'TOUKAM CHAT' et une petite mise en forme (bandeau,
+    liseré de couleur, pied de page), sans jamais gêner la lecture du contenu."""
+
+    def header(self):
+        # --- Filigrane diagonal, très clair, en fond de page : décoratif, pas gênant à la lecture ---
+        self.set_font("Arial", size=42)
+        self.set_text_color(232, 232, 232)
+        largeur_filigrane = self.get_string_width("TOUKAM CHAT")
+        try:
+            with self.rotation(45, x=self.w / 2, y=self.h / 2):
+                self.text(self.w / 2 - largeur_filigrane / 2, self.h / 2, "TOUKAM CHAT")
+        except AttributeError:
+            pass  # Ancienne version de fpdf sans support de rotation : on ignore simplement le filigrane
+
+        # --- Petit bandeau supérieur : logo texte + liseré de couleur ---
+        self.set_text_color(110, 110, 110)
+        self.set_font("Arial", size=9)
+        self.set_xy(self.l_margin, 8)
+        self.cell(0, 5, "Toukam Chat", align="L")
+        self.set_draw_color(46, 139, 87)
+        self.set_line_width(0.6)
+        self.line(self.l_margin, 14, self.w - self.r_margin, 14)
+
+        self.set_text_color(0, 0, 0)
+        self.set_xy(self.l_margin, 20)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_draw_color(210, 210, 210)
+        self.set_line_width(0.2)
+        self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
+        self.set_font("Arial", size=8)
+        self.set_text_color(150, 150, 150)
+        self.cell(0, 10, f"Toukam Chat  -  page {self.page_no()}/{{nb}}", align="C")
+
+
 def generer_pdf(contenu):
     """Crée un PDF lisible à partir du texte de l'IA (nettoyage Markdown/LaTeX, police Unicode,
-    et fractions dessinées avec une vraie barre horizontale)."""
-    pdf = FPDF()
+    fractions composées en ligne avec une vraie barre horizontale, et une mise en page discrètement
+    stylée avec filigrane "Toukam Chat")."""
+    pdf = _PDFToukamChat()
+    pdf.alias_nb_pages()
+    pdf.set_auto_page_break(auto=True, margin=20)
     pdf.add_page()
 
     police_unicode = _trouver_police_unicode()
@@ -454,7 +555,7 @@ with st.sidebar:
             if cle_deja_enregistree:
                 st.success(f"✅ Clé enregistrée : ...{cle_deja_enregistree[-4:]}")
             nouvelle_cle = st.text_input(
-                "Ta clé API Gemini (clé Google AI Studio)",
+                "Ta clé API  (clé Google AI Studio)",
                 type="password",
                 key="champ_cle_perso"
             )
@@ -476,7 +577,6 @@ with st.sidebar:
     st.divider()
     st.caption("Développé fièrement par **Toukam Paul** 🚀")
 
-
 # --- HISTORIQUE ET INTERFACE DES ONGLETS ---
 SYSTEM_PROMPT = """Tu es Toukam Chat. Tu es un tuteur académique d'élite, brillant, logique et multimodal. 
 ATTENTION : Tu as été entièrement développé et conçu par Toukam Paul, un jeune développeur talentueux. Tu n'es pas un produit créé par Google. 
@@ -487,7 +587,33 @@ les codes ultra confidentiel si et seulement si je vient a te donner le mot de p
 pour tout ceux qui veulent partarger l'application, voici le lien de l'application : https://median.co/share/odrrwjl#apk
 - Analyse les images (exercices de mathématiques ou de physique et autres) et l'audio avec précision.
 - En mode 'Fiche de révision', sois synthétique (concepts, formules indispensables, détail bien, suivi d'un mini-quiz de 3 questions).
-- En mode 'Planning intelligent', planifie l'organisation des révisions en utilisant la méthode de la répétition espacée."""
+- En mode 'Planning intelligent', planifie l'organisation des révisions en utilisant la méthode de la répétition espacée.
+- IMPORTANT (pour nommer le futur PDF) : sur la toute première ligne de ta réponse, et uniquement sur celle-ci, indique un titre court (3 à 8 mots, sans ponctuation finale) résumant le sujet traité, 
+sous la forme exacte : [TITRE: titre ici]. Exemple : [TITRE: Forces et Champs (Tle C)]. Passe ensuite une ligne, puis rédige normalement ta réponse complète juste en dessous. N'oublie jamais cette première ligne,
+même pour une question très courte."""
+
+_MOTIF_TITRE_PDF = re.compile(r'^\s*\[TITRE:\s*(.+?)\]\s*\n+', re.IGNORECASE)
+
+
+def extraire_titre_et_reponse(reponse_brute):
+    """Sépare le titre court généré par l'IA (première ligne [TITRE: ...]) du reste de la réponse
+    destinée à l'élève. Retourne (titre_ou_None, reponse_sans_le_marqueur)."""
+    m = _MOTIF_TITRE_PDF.match(reponse_brute)
+    if m:
+        return m.group(1).strip(), reponse_brute[m.end():].lstrip()
+    return None, reponse_brute
+
+
+def nom_fichier_depuis_titre(titre):
+    """Transforme un titre libre en nom de fichier PDF sûr (sans caractères interdits),
+    avec un repli si le titre est vide ou absent."""
+    if not titre or not titre.strip():
+        return "Toukam_Etude.pdf"
+    nom = titre.strip()
+    nom = re.sub(r'[\\/:*?"<>|]', '', nom)   # caractères interdits dans un nom de fichier
+    nom = re.sub(r'\s+', ' ', nom).strip()
+    nom = nom[:80].strip()                    # longueur raisonnable
+    return f"{nom}.pdf" if nom else "Toukam_Etude.pdf"
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
@@ -625,8 +751,9 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
                         continue
                         
             if reponse:
+                titre_pdf, reponse = extraire_titre_et_reponse(reponse)
                 st.markdown(reponse)
-                st.session_state.chat_history.append({"role": "assistant", "content": reponse})
+                st.session_state.chat_history.append({"role": "assistant", "content": reponse, "titre": titre_pdf})
                 faire_defiler_vers_le_bas()
                 st.rerun()
             else:
@@ -634,8 +761,10 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
 
 # --- ACTIONS COMPLÉMENTAIRES ET CONVERSION GLOBALE ---
 if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "assistant":
-    reponse_existante = st.session_state.chat_history[-1]["content"]
-    
+    dernier_message_assistant = st.session_state.chat_history[-1]
+    reponse_existante = dernier_message_assistant["content"]
+    nom_pdf = nom_fichier_depuis_titre(dernier_message_assistant.get("titre"))
+
     st.write("### 📄 Options de téléchargement")
     quotas_actuels = recuperer_quotas(email_user)
     bloque_pdf = not est_premium and quotas_actuels["pdf_conv"] >= 2
@@ -646,7 +775,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
             st.warning("🔒 Téléchargement PDF bloqué (Votre quota gratuit de 2 fiches/cours est atteint).")
         else:
             pdf_bytes = generer_pdf(reponse_existante)
-            if st.download_button("💾 Télécharger en PDF", data=pdf_bytes, file_name="Toukam_Etude.pdf", key="download_global_pdf"):
+            if st.download_button("💾 Télécharger en PDF", data=pdf_bytes, file_name=nom_pdf, key="download_global_pdf"):
                 if not est_premium:
                     incrementer_quota(email_user, "pdf_conv")
     with col2:
@@ -655,7 +784,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
         else:
             if email_user and st.button("📧 Envoyer par e-mail", key="email_global_pdf"):
                 pdf_bytes = generer_pdf(reponse_existante)
-                if envoyer_email(email_user, pdf_bytes, "Toukam_Etude.pdf"):
+                if envoyer_email(email_user, pdf_bytes, nom_pdf):
                     st.success(f"E-mail envoyé avec succès à {email_user} !")
 
 if not st.session_state.chat_history:
