@@ -1,5 +1,6 @@
-streamlit
+streamlit>=1.37
+PyMuPDF
+fpdf2
+Pillow
 google-genai
-pillow
-pymupdf
 fpdf
