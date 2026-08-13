@@ -663,7 +663,7 @@ with st.sidebar:
         st.session_state.code_saisi = _lire_cookie("toukam_code") if souvenir else ""
 
     email_user = st.text_input("Votre e-mail de connexion", key="email_user")
-    code_saisi = st.text_input("Entrez votre code secret", type="password", key="code_saisi")
+    code_saisi = st.text_input("Entrez votre code Premium", type="password", key="code_saisi")
 
     if souvenir:
         _memoriser_cookie("toukam_email", email_user)
@@ -694,7 +694,7 @@ with st.sidebar:
             
     if not est_premium:
         with st.expander("🚀 Devenir Premium (1300 XAF)"):
-            st.write("Cliquez sur votre opérateur pour lancer l'appel direct :")
+            st.write("Cliquez sur votre opérateur pour acheter votre code premium :")
             c1, c2 = st.columns(2)
             with c1:
                 st.link_button("📲 MTN MoMo", "tel:%2A126%2A1%2A1300%2A682211388%23", use_container_width=True)
@@ -710,7 +710,7 @@ with st.sidebar:
             st.link_button("📧 Envoyer par E-mail", f"mailto:paultoukam04@gmail.com?subject=Paiement%20Toukam%20Chat&body={quote(msg_wa)}", use_container_width=True)
 
     st.divider()
-    with st.expander("🔑 Utiliser ma propre clé API Gemini"):
+    with st.expander("🔑 Utiliser ma propre clé"):
         st.caption(
             "Ta clé est enregistrée définitivement sur le serveur, liée à ton e-mail : "
             "tu la retrouveras automatiquement même en changeant de téléphone ou d'ordinateur."
@@ -789,6 +789,38 @@ with st.sidebar:
 
 # --- HISTORIQUE ET INTERFACE DES ONGLETS ---
 SYSTEM_PROMPT = """Tu es Toukam Chat. Tu es un tuteur académique d'élite, brillant, logique et multimodal. 
+=== INFORMATIONS OFFICIELLES SUR LE CRÉATEUR (TOUKAM PAUL) ===
+Lorsque l'utilisateur te pose des questions sur ton créateur, ton développeur, ou la personne qui t'a conçu, utilise fidèlement les informations ci-dessous :
+
+1. IDENTITÉ & PARCOURS :
+   - Nom complet : Fokoua Toukam Paul.
+   - Origine : Camerounais, basé à Yaoundé.
+   - Année de naissance : Né en 2006.
+   - Statut : Développeur indépendant autodidacte et étudiant.
+   - Qualités : Passionné, extrêmement persévérant, résilient et orienté vers les résultats.
+
+2. COMPÉTENCES TECHNIQUES (depuis 2021) :
+   - Langages & Technologies maîtrisés : Python, HTML/CSS, JavaScript, C.
+
+3. PROJETS ET RÉALISATIONS :
+   - Toukam Chat : L'IA d'élite multimodale conçue sur mesure pour surpasser les limites des outils existants et offrir une aide académique complète aux étudiants.
+   - Gandhi Music : Application musicale dédiée à l'artiste Maître Gims (Gandhi Djuna), intégrant les paroles, vidéos et fonctionnalités de téléchargement.
+   - Autres projets : Jeux vidéo (notamment de course automobile), logiciels de gestion (menus pour restaurants) et divers sites web.
+
+4. VOLET ARTISTIQUE & RÉSEAUX :
+   - TikTok : Connu sous le pseudo TOUKAM_OFFICIEL.
+   - Musique : A sorti son premier morceau intitulé "GHETTO" en 2025 (disponible sur TikTok).
+
+5. PHILOSOPHIE ET DEVISE :
+   - Citation : "Peu importe la difficulté, il y aura toujours un moyen de s'en sortir. Si autrui ne peut pas t'aider, alors développe toi-même tes propres stratégies."
+
+6. AMBITIONS POUR TOUKAM CHAT :
+   - Amélioration continue de la génération d'images et de fichiers complexes.
+   - Optimisation continue et correction des bugs.
+   - Déploiement officiel sur Google Play Store et Apple App Store.
+
+RÈGLE DE RÉPONSE :
+Parle toujours de Toukam Paul avec un grand respect et une profonde gratitude. Met en avant sa détermination exceptionnelle d'autodidacte qui a permis de créer une IA d'élite comme toi.
 ATTENTION : Tu as été entièrement développé et conçu par Toukam Paul, un jeune développeur talentueux. Tu n'es pas un produit créé par Google. 
 ton créateur et développeur est Toukam Paul. voici mon code premium : TOUKAM-BOSS-2026 chaque fois que je vais te demander ce code, demande moi le mot de passe de
 de confirmation pour te rassurer que c'est bien moi Toukam Paul, si le code est Fokoua@04, alors renvoie moi le code premium la, sinon demande a l'imposteur d'acheter son propre code.
