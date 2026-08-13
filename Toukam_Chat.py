@@ -18,6 +18,15 @@ from google import genai
 from google.genai import types
 from google.genai.errors import APIError
 
+# --- DOSSIER DE FICHIERS STATIQUES (pour que le PDF soit accessible par une vraie URL) ---
+# Nécessaire au téléchargement du PDF dans l'app APK : contrairement à un navigateur, la WebView
+# de Median ne sait pas gérer un fichier généré en mémoire (blob) via st.download_button, elle a
+# besoin d'une vraie URL http(s). Voir aussi : côté hébergement, il faut activer
+# enableStaticServing = true dans .streamlit/config.toml (section [server]), sinon ce dossier
+# n'est pas servi et l'URL renverra une erreur 404.
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+os.makedirs(STATIC_DIR, exist_ok=True)
+
 # --- CONFIGURATION ET STRUCTURE VISUELLE (Toukam Chat) ---
 st.set_page_config(page_title="Toukam Chat", page_icon="🎓", layout="wide")
 st.title("🎓 Toukam Chat : Votre Tuteur IA d'Élite")
@@ -55,6 +64,16 @@ def _lire_cookie(nom, defaut=""):
     try:
         valeur = st.context.cookies.get(nom)
     except Exception:
+        # st.context.cookies n'existe pas (version de Streamlit trop ancienne, <1.37 environ) :
+        # c'est très probablement pourquoi la connexion ne reste jamais mémorisée. On le signale
+        # une seule fois au lieu d'échouer en silence à chaque rechargement.
+        if not st.session_state.get("_alerte_cookie_affichee"):
+            st.session_state["_alerte_cookie_affichee"] = True
+            st.sidebar.warning(
+                "⚠️ La mémorisation de connexion ne fonctionne pas : `st.context.cookies` est "
+                "indisponible sur cette version de Streamlit. Mets à jour Streamlit (≥1.37) dans "
+                "requirements.txt pour corriger ça."
+            )
         valeur = None
     if not valeur:
         return defaut
@@ -65,18 +84,35 @@ def _lire_cookie(nom, defaut=""):
 
 
 def _memoriser_cookie(nom, valeur, jours=365):
-    """Écrit une valeur dans un cookie du navigateur (persistant plusieurs mois)."""
+    """Écrit une valeur dans un cookie du navigateur (persistant plusieurs mois).
+    CORRECTIF : st.markdown(unsafe_allow_html=True) n'exécute jamais les balises <script>
+    (limitation du DOM), donc ce cookie n'était en réalité JAMAIS écrit -- d'où la
+    reconnexion systématique. st.components.v1.html rend le JS dans un vrai <iframe> où
+    le script s'exécute réellement ; on écrit le cookie sur le document parent (la vraie
+    page de l'app) pour que le futur chargement de page le retrouve bien."""
     valeur_encodee = quote((valeur or "").strip())
-    st.markdown(
-        f'<script>document.cookie = "{nom}={valeur_encodee}; path=/; max-age={jours * 86400}; SameSite=Lax";</script>',
-        unsafe_allow_html=True,
+    st.components.v1.html(
+        f"""<script>
+        try {{
+            window.parent.document.cookie = "{nom}={valeur_encodee}; path=/; max-age={jours * 86400}; SameSite=Lax";
+        }} catch (e) {{
+            document.cookie = "{nom}={valeur_encodee}; path=/; max-age={jours * 86400}; SameSite=Lax";
+        }}
+        </script>""",
+        height=0,
     )
 
 
 def _effacer_cookie(nom):
-    st.markdown(
-        f'<script>document.cookie = "{nom}=; path=/; max-age=0";</script>',
-        unsafe_allow_html=True,
+    st.components.v1.html(
+        f"""<script>
+        try {{
+            window.parent.document.cookie = "{nom}=; path=/; max-age=0";
+        }} catch (e) {{
+            document.cookie = "{nom}=; path=/; max-age=0";
+        }}
+        </script>""",
+        height=0,
     )
 
 
@@ -220,7 +256,12 @@ if "pool_cles" not in st.session_state:
 CLE_PREMIUM_PROD = "METS_TA_FUTURE_CLE_PAYANTE_ICI"
 
 def faire_defiler_vers_le_bas():
-    st.markdown('<div id="fin-du-chat"></div><script>var element = window.parent.document.getElementById("fin-du-chat");if (element) { element.scrollIntoView({ behavior: "smooth", block: "end" }); }</script>', unsafe_allow_html=True)
+    st.markdown('<div id="fin-du-chat"></div>', unsafe_allow_html=True)
+    st.components.v1.html(
+        '<script>var element = window.parent.document.getElementById("fin-du-chat");'
+        'if (element) { element.scrollIntoView({ behavior: "smooth", block: "end" }); }</script>',
+        height=0,
+    )
 
 # Marqueurs internes (caractères invisibles à usage privé Unicode) utilisés pour repérer
 # les fractions dans le texte et les redessiner plus tard avec une vraie barre horizontale
@@ -332,6 +373,38 @@ def convertir_exposants_indices(texte):
         return (m.group(1) or m.group(2)).translate(_INDICES)
 
     texte = re.sub(r'_\((\d+|[a-z])\)|_(\d+|[a-z])', _indice_simple, texte)
+    return texte
+
+
+def nettoyer_pour_affichage(texte):
+    """Nettoie la réponse brute de l'IA pour un affichage lisible DANS LE CHAT (écran), en
+    convertissant les indices/exposants et le LaTeX en vrai Unicode -- contrairement à
+    nettoyer_pour_pdf(), on garde le Markdown (gras, listes...) car st.write/st.markdown
+    sait déjà le restituer correctement à l'écran."""
+    if not texte:
+        return texte
+    texte = texte.replace('$$', '').replace('$', '')
+    remplacements = {
+        r'\times': '×', r'\cdot': '·', r'\pi': 'π', r'\sqrt': '√',
+        r'\implies': '⇒', r'\Rightarrow': '⇒', r'\rightarrow': '→', r'\to': '→',
+        r'\leq': '≤', r'\geq': '≥', r'\neq': '≠', r'\approx': '≈',
+        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\Theta': 'Θ', r'\theta': 'θ',
+        r'\ell': 'ℓ', r'\infty': '∞', r'\pm': '±', r'\Delta': 'Δ', r'\omega': 'ω',
+        r'\eta': 'η', r'\mu': 'μ', r'\nu': 'ν', r'\lambda': 'λ', r'\sigma': 'σ',
+        r'\rho': 'ρ', r'\phi': 'φ', r'\tau': 'τ',
+        r'\text': '', r'\mathbf': '', r'\left': '', r'\right': '',
+    }
+    for latex, symbole in remplacements.items():
+        texte = texte.replace(latex, symbole)
+    # \frac{a}{b} -> "a⁄b" lisible en ligne (pas de vraie barre horizontale possible en Markdown)
+    texte = re.sub(
+        r'\\frac\{([^{}]*)\}\{([^{}]*)\}',
+        lambda m: f"{m.group(1).strip()}⁄{m.group(2).strip()}",
+        texte
+    )
+    texte = re.sub(r'\\[a-zA-Z]+', '', texte)
+    texte = texte.replace('{', '').replace('}', '')
+    texte = convertir_exposants_indices(texte)
     return texte
 
 
@@ -538,6 +611,16 @@ def generer_pdf(contenu):
     return bytes(flux_brut)
 
 
+def sauvegarder_pdf_statique(pdf_bytes, nom_pdf):
+    """Écrit le PDF dans le dossier static/ avec un nom unique, pour obtenir une vraie URL
+    de téléchargement (indispensable pour que ça marche dans l'app APK, pas seulement au
+    navigateur). Retourne le nom du fichier écrit."""
+    nom_fichier = f"{uuid.uuid4().hex}_{nom_pdf}"
+    with open(os.path.join(STATIC_DIR, nom_fichier), "wb") as f:
+        f.write(pdf_bytes)
+    return nom_fichier
+
+
 def envoyer_email(destinataire, fichier_pdf, nom_fichier):
     expediteur = "paultoukam04@gmail.com"
     mot_de_pass = "VOTRE_MOT_DE_PASSE_APPLICATION"  # Remplace par ton code application à 16 lettres
@@ -553,7 +636,7 @@ def envoyer_email(destinataire, fichier_pdf, nom_fichier):
     part.add_header('Content-Disposition', f"attachment; filename={nom_fichier}")
     msg.attach(part)
     try:
-        server = smtplib.SMTP('://gmail.com', 587)
+        server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(expediteur, mot_de_pass)
         server.send_message(msg)
@@ -585,7 +668,7 @@ with st.sidebar:
         st.session_state.code_saisi = _lire_cookie("toukam_code") if souvenir else ""
 
     email_user = st.text_input("Votre e-mail de connexion", key="email_user")
-    code_saisi = st.text_input("Entrez votre code secret", type="password", key="code_saisi")
+    code_saisi = st.text_input("Entrez votre code Premium", type="password", key="code_saisi")
 
     if souvenir:
         _memoriser_cookie("toukam_email", email_user)
@@ -625,11 +708,14 @@ with st.sidebar:
             st.markdown("---")
             st.write("### Étape 2 : Envoyez votre reçu")
             msg_wa = f"Bonjour Paul ! Je viens de payer 1300 XAF pour Toukam Chat Premium. Mon e-mail est : {email_user}."
-            st.link_button("🟢 Envoyer par WhatsApp", f"https://wa.me{msg_wa.replace(' ', '%20')}", use_container_width=True)
-            st.link_button("📧 Envoyer par E-mail", f"mailto:paultoukam04@://gmail.com{msg_wa.replace(' ', '%20')}", use_container_width=True)
+            # NUMERO_WHATSAPP : mets ici ton numéro au format international sans "+" ni espaces
+            # (ex. 237682211388), sinon le bouton WhatsApp n'a pas de destinataire.
+            NUMERO_WHATSAPP = "237682211388"
+            st.link_button("🟢 Envoyer par WhatsApp", f"https://wa.me/{NUMERO_WHATSAPP}?text={quote(msg_wa)}", use_container_width=True)
+            st.link_button("📧 Envoyer par E-mail", f"mailto:paultoukam04@gmail.com?subject=Paiement%20Toukam%20Chat&body={quote(msg_wa)}", use_container_width=True)
 
     st.divider()
-    with st.expander("🔑 Utiliser ma propre clé API Gemini"):
+    with st.expander("🔑 Utiliser ma propre clé API"):
         st.caption(
             "Ta clé est enregistrée définitivement sur le serveur, liée à ton e-mail : "
             "tu la retrouveras automatiquement même en changeant de téléphone ou d'ordinateur."
@@ -659,6 +745,49 @@ with st.sidebar:
                     supprimer_cle_utilisateur(email_user)
                     st.success("Clé supprimée.")
                     st.rerun()
+
+    st.divider()
+    with st.expander("📷🎙️ Problème d'autorisation caméra/micro ?"):
+        st.caption(
+            "Si l'appareil photo ou le micro ne fonctionnent pas et qu'aucune fenêtre "
+            "d'autorisation ne s'affiche, c'est probablement qu'Android/iOS a déjà enregistré "
+            "un refus. Le bouton ci-dessous ouvre directement l'écran des paramètres de "
+            "l'application où tu peux activer Caméra et Microphone manuellement."
+        )
+        st.components.v1.html(
+            """
+            <button id="btn_parametres_app" style="
+                background-color:#2E8B57; color:white; border:none; padding:0.55em 1em;
+                border-radius:8px; cursor:pointer; width:100%; font-size:0.95em; font-family:inherit;">
+                ⚙️ Ouvrir les paramètres de l'application
+            </button>
+            <div id="msg_parametres_app" style="font-size:0.85em; color:#888; margin-top:6px;"></div>
+            <script>
+            (function() {
+                var btn = document.getElementById("btn_parametres_app");
+                var msg = document.getElementById("msg_parametres_app");
+                if (!btn) { return; }
+                btn.onclick = function() {
+                    try {
+                        if (window.parent && window.parent.median && window.parent.median.open
+                            && window.parent.median.open.appSettings) {
+                            window.parent.median.open.appSettings();
+                            return;
+                        }
+                    } catch (e) {}
+                    if (window.median && window.median.open && window.median.open.appSettings) {
+                        window.median.open.appSettings();
+                        return;
+                    }
+                    // Repli : pas dans l'app Median (ex. testé depuis un navigateur PC/mobile classique)
+                    msg.textContent = "Ouvre manuellement les réglages de ton appareil : "
+                        + "Paramètres > Applications > (nom de l'app) > Autorisations.";
+                };
+            })();
+            </script>
+            """,
+            height=90,
+        )
 
     st.divider()
     st.caption("Développé fièrement par **Toukam Paul** 🚀")
@@ -707,7 +836,8 @@ if "chat_history" not in st.session_state:
 for m in st.session_state.chat_history:
     avatar_actuel = AVATAR_ETUDIANT if m["role"] == "user" else AVATAR_TOUKAM
     with st.chat_message(m["role"], avatar=avatar_actuel):
-        st.write(m["content"])
+        contenu_affiche = nettoyer_pour_affichage(m["content"]) if m["role"] == "assistant" else m["content"]
+        st.write(contenu_affiche)
 
 st.write("---")
 tab_text, tab_photo, tab_camera, tab_pdf, tab_audio = st.tabs(["📝 Texte", "🖼️ Galerie", "📸 Appareil Photo", "📂 Document PDF", "🎙️ Note Vocale"])
@@ -838,7 +968,7 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
                         
             if reponse:
                 titre_pdf, reponse = extraire_titre_et_reponse(reponse)
-                st.markdown(reponse)
+                st.markdown(nettoyer_pour_affichage(reponse))
                 st.session_state.chat_history.append({"role": "assistant", "content": reponse, "titre": titre_pdf})
                 faire_defiler_vers_le_bas()
                 st.rerun()
@@ -860,10 +990,96 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
         if bloque_pdf:
             st.warning("🔒 Téléchargement PDF bloqué (Votre quota gratuit de 2 fiches/cours est atteint).")
         else:
-            pdf_bytes = generer_pdf(reponse_existante)
-            if st.download_button("💾 Télécharger en PDF", data=pdf_bytes, file_name=nom_pdf, key="download_global_pdf"):
-                if not est_premium:
-                    incrementer_quota_anti_triche(email_user, device_id, "pdf_conv")
+            # CORRECTIF : Streamlit réexécute tout le script à chaque interaction (clic, saisie...).
+            # Sans ce cache, generer_pdf()/sauvegarder_pdf_statique() étaient appelés à CHAQUE rerun,
+            # donc un nouveau fichier PDF était écrit dans static/ à chaque fois -- même sans jamais
+            # cliquer sur "Télécharger". On ne génère et n'écrit désormais le fichier qu'une seule
+            # fois par message, puis on réutilise le nom de fichier déjà créé.
+            if "pdf_cache" not in st.session_state:
+                st.session_state.pdf_cache = {}
+            cle_cache_pdf = f"pdf_{len(st.session_state.chat_history) - 1}"
+
+            if cle_cache_pdf in st.session_state.pdf_cache:
+                nom_fichier_statique = st.session_state.pdf_cache[cle_cache_pdf]
+            else:
+                pdf_bytes = generer_pdf(reponse_existante)
+                nom_fichier_statique = sauvegarder_pdf_statique(pdf_bytes, nom_pdf)
+                st.session_state.pdf_cache[cle_cache_pdf] = nom_fichier_statique
+
+            url_relative = f"app/static/{nom_fichier_statique}"
+
+            # CORRECTIF IMPORTANT : st.markdown(unsafe_allow_html=True) n'exécute JAMAIS les
+            # balises <script> qu'il contient (limitation du DOM : un script inséré via innerHTML
+            # ne se lance pas tout seul). Le bouton s'affichait donc, mais aucun clic n'était
+            # jamais réellement branché dessus -- ni sur PC, ni sur Android. On utilise à la place
+            # st.components.v1.html, qui rend le contenu dans un vrai <iframe> où le JS s'exécute
+            # normalement. Comme l'iframe est une fenêtre à part, on vérifie le pont Median à la
+            # fois dans la fenêtre de l'iframe ET dans la fenêtre parente (celle de l'app Median).
+            html_bouton_pdf = f"""
+                <button id="btn_pdf" style="
+                    background-color:#2E8B57; color:white; border:none; padding:0.55em 1em;
+                    border-radius:8px; cursor:pointer; width:100%; font-size:1em; font-family:inherit;">
+                    💾 Télécharger en PDF
+                </button>
+                <script>
+                (function() {{
+                    var url = new URL("{url_relative}", window.parent.location.href).href;
+                    var btn = document.getElementById("btn_pdf");
+                    if (!btn) {{ return; }}
+
+                    function telechargerNavigateur() {{
+                        var a = document.createElement("a");
+                        a.href = url;
+                        a.download = "{nom_pdf}";
+                        a.target = "_blank";
+                        document.body.appendChild(a);
+                        a.click();
+                        document.body.removeChild(a);
+                    }}
+
+                    function pontMedian() {{
+                        if (window.median && window.median.share && window.median.share.downloadFile) {{
+                            return window.median;
+                        }}
+                        try {{
+                            if (window.parent && window.parent.median && window.parent.median.share
+                                && window.parent.median.share.downloadFile) {{
+                                return window.parent.median;
+                            }}
+                        }} catch (e) {{}}
+                        return null;
+                    }}
+
+                    btn.onclick = function() {{
+                        var tentatives = 0;
+                        var maxTentatives = 15; // 15 x 100ms = 1.5s
+                        var intervalle = setInterval(function() {{
+                            tentatives++;
+                            var median = pontMedian();
+                            if (median) {{
+                                clearInterval(intervalle);
+                                console.log("[ToukamChat] Téléchargement via le pont Median :", url);
+                                median.share.downloadFile({{url: url, open: true}});
+                            }} else if (tentatives >= maxTentatives) {{
+                                clearInterval(intervalle);
+                                console.log("[ToukamChat] Pont Median indisponible, repli navigateur :", url);
+                                telechargerNavigateur();
+                            }}
+                        }}, 100);
+                    }};
+                }})();
+                </script>
+            """
+            st.components.v1.html(html_bouton_pdf, height=60)
+
+            # Le quota est compté une fois par fiche générée (et non plus au clic précis du
+            # bouton : un bouton HTML pur ne peut pas déclencher Python au clic sans composant
+            # dédié). cle_compteur_pdf évite de compter plusieurs fois la même fiche à chaque
+            # rafraîchissement de la page.
+            cle_compteur_pdf = f"pdf_compte_{len(st.session_state.chat_history)}"
+            if not est_premium and not st.session_state.get(cle_compteur_pdf):
+                incrementer_quota_anti_triche(email_user, device_id, "pdf_conv")
+                st.session_state[cle_compteur_pdf] = True
     with col2:
         if not est_premium:
             st.warning("🔒 Option E-mail réservée aux Premium.")
