@@ -506,7 +506,9 @@ def ecrire_avec_fractions(pdf, texte, hauteur_ligne=8, unicode_ok=True):
                 if mot != "":
                     mot_aff = _texte_ok(mot)
                     jetons.append(("mot", mot_aff, pdf.get_string_width(mot_aff)))
-            largeur_frac, taille_frac = _mesurer_fraction(pdf, m.group(1), m.group(2), taille_normale)
+            largeur_frac, taille_frac = _mesurer_fraction(
+                pdf, _texte_ok(m.group(1)), _texte_ok(m.group(2)), taille_normale
+            )
             jetons.append(("fraction", _texte_ok(m.group(1)), _texte_ok(m.group(2)), largeur_frac, taille_frac))
             position = m.end()
         for mot in paragraphe[position:].split(" "):
@@ -668,7 +670,7 @@ with st.sidebar:
         st.session_state.code_saisi = _lire_cookie("toukam_code") if souvenir else ""
 
     email_user = st.text_input("Votre e-mail de connexion", key="email_user")
-    code_saisi = st.text_input("Entrez votre code Premium", type="password", key="code_saisi")
+    code_saisi = st.text_input("Entrez votre code secret", type="password", key="code_saisi")
 
     if souvenir:
         _memoriser_cookie("toukam_email", email_user)
@@ -715,7 +717,7 @@ with st.sidebar:
             st.link_button("📧 Envoyer par E-mail", f"mailto:paultoukam04@gmail.com?subject=Paiement%20Toukam%20Chat&body={quote(msg_wa)}", use_container_width=True)
 
     st.divider()
-    with st.expander("🔑 Utiliser ma propre clé API"):
+    with st.expander("🔑 Utiliser ma propre clé API Gemini"):
         st.caption(
             "Ta clé est enregistrée définitivement sur le serveur, liée à ton e-mail : "
             "tu la retrouveras automatiquement même en changeant de téléphone ou d'ordinateur."
@@ -999,94 +1001,108 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
                 st.session_state.pdf_cache = {}
             cle_cache_pdf = f"pdf_{len(st.session_state.chat_history) - 1}"
 
+            erreur_pdf = None
             if cle_cache_pdf in st.session_state.pdf_cache:
                 nom_fichier_statique = st.session_state.pdf_cache[cle_cache_pdf]
             else:
-                pdf_bytes = generer_pdf(reponse_existante)
-                nom_fichier_statique = sauvegarder_pdf_statique(pdf_bytes, nom_pdf)
-                st.session_state.pdf_cache[cle_cache_pdf] = nom_fichier_statique
+                try:
+                    pdf_bytes = generer_pdf(reponse_existante)
+                    nom_fichier_statique = sauvegarder_pdf_statique(pdf_bytes, nom_pdf)
+                    st.session_state.pdf_cache[cle_cache_pdf] = nom_fichier_statique
+                except Exception as e:
+                    # Un caractère imprévu ne doit jamais faire planter toute l'application :
+                    # on affiche juste une erreur et on n'affiche pas le bouton pour cette fiche.
+                    erreur_pdf = str(e)
+                    nom_fichier_statique = None
 
-            url_relative = f"app/static/{nom_fichier_statique}"
+            if erreur_pdf:
+                st.error(f"⚠️ Impossible de générer ce PDF (caractère non pris en charge) : {erreur_pdf}")
+            else:
+                url_relative = f"app/static/{nom_fichier_statique}"
 
-            # CORRECTIF IMPORTANT : st.markdown(unsafe_allow_html=True) n'exécute JAMAIS les
-            # balises <script> qu'il contient (limitation du DOM : un script inséré via innerHTML
-            # ne se lance pas tout seul). Le bouton s'affichait donc, mais aucun clic n'était
-            # jamais réellement branché dessus -- ni sur PC, ni sur Android. On utilise à la place
-            # st.components.v1.html, qui rend le contenu dans un vrai <iframe> où le JS s'exécute
-            # normalement. Comme l'iframe est une fenêtre à part, on vérifie le pont Median à la
-            # fois dans la fenêtre de l'iframe ET dans la fenêtre parente (celle de l'app Median).
-            html_bouton_pdf = f"""
-                <button id="btn_pdf" style="
-                    background-color:#2E8B57; color:white; border:none; padding:0.55em 1em;
-                    border-radius:8px; cursor:pointer; width:100%; font-size:1em; font-family:inherit;">
-                    💾 Télécharger en PDF
-                </button>
-                <script>
-                (function() {{
-                    var url = new URL("{url_relative}", window.parent.location.href).href;
-                    var btn = document.getElementById("btn_pdf");
-                    if (!btn) {{ return; }}
+                # CORRECTIF IMPORTANT : st.markdown(unsafe_allow_html=True) n'exécute JAMAIS les
+                # balises <script> qu'il contient (limitation du DOM : un script inséré via innerHTML
+                # ne se lance pas tout seul). Le bouton s'affichait donc, mais aucun clic n'était
+                # jamais réellement branché dessus -- ni sur PC, ni sur Android. On utilise à la place
+                # st.components.v1.html, qui rend le contenu dans un vrai <iframe> où le JS s'exécute
+                # normalement. Comme l'iframe est une fenêtre à part, on vérifie le pont Median à la
+                # fois dans la fenêtre de l'iframe ET dans la fenêtre parente (celle de l'app Median).
+                html_bouton_pdf = f"""
+                    <button id="btn_pdf" style="
+                        background-color:#2E8B57; color:white; border:none; padding:0.55em 1em;
+                        border-radius:8px; cursor:pointer; width:100%; font-size:1em; font-family:inherit;">
+                        💾 Télécharger en PDF
+                    </button>
+                    <script>
+                    (function() {{
+                        var url = new URL("{url_relative}", window.parent.location.href).href;
+                        var btn = document.getElementById("btn_pdf");
+                        if (!btn) {{ return; }}
 
-                    function telechargerNavigateur() {{
-                        var a = document.createElement("a");
-                        a.href = url;
-                        a.download = "{nom_pdf}";
-                        a.target = "_blank";
-                        document.body.appendChild(a);
-                        a.click();
-                        document.body.removeChild(a);
-                    }}
-
-                    function pontMedian() {{
-                        if (window.median && window.median.share && window.median.share.downloadFile) {{
-                            return window.median;
+                        function telechargerNavigateur() {{
+                            var a = document.createElement("a");
+                            a.href = url;
+                            a.download = "{nom_pdf}";
+                            a.target = "_blank";
+                            document.body.appendChild(a);
+                            a.click();
+                            document.body.removeChild(a);
                         }}
-                        try {{
-                            if (window.parent && window.parent.median && window.parent.median.share
-                                && window.parent.median.share.downloadFile) {{
-                                return window.parent.median;
-                            }}
-                        }} catch (e) {{}}
-                        return null;
-                    }}
 
-                    btn.onclick = function() {{
-                        var tentatives = 0;
-                        var maxTentatives = 15; // 15 x 100ms = 1.5s
-                        var intervalle = setInterval(function() {{
-                            tentatives++;
-                            var median = pontMedian();
-                            if (median) {{
-                                clearInterval(intervalle);
-                                console.log("[ToukamChat] Téléchargement via le pont Median :", url);
-                                median.share.downloadFile({{url: url, open: true}});
-                            }} else if (tentatives >= maxTentatives) {{
-                                clearInterval(intervalle);
-                                console.log("[ToukamChat] Pont Median indisponible, repli navigateur :", url);
-                                telechargerNavigateur();
+                        function pontMedian() {{
+                            if (window.median && window.median.share && window.median.share.downloadFile) {{
+                                return window.median;
                             }}
-                        }}, 100);
-                    }};
-                }})();
-                </script>
-            """
-            st.components.v1.html(html_bouton_pdf, height=60)
+                            try {{
+                                if (window.parent && window.parent.median && window.parent.median.share
+                                    && window.parent.median.share.downloadFile) {{
+                                    return window.parent.median;
+                                }}
+                            }} catch (e) {{}}
+                            return null;
+                        }}
 
-            # Le quota est compté une fois par fiche générée (et non plus au clic précis du
-            # bouton : un bouton HTML pur ne peut pas déclencher Python au clic sans composant
-            # dédié). cle_compteur_pdf évite de compter plusieurs fois la même fiche à chaque
-            # rafraîchissement de la page.
-            cle_compteur_pdf = f"pdf_compte_{len(st.session_state.chat_history)}"
-            if not est_premium and not st.session_state.get(cle_compteur_pdf):
-                incrementer_quota_anti_triche(email_user, device_id, "pdf_conv")
-                st.session_state[cle_compteur_pdf] = True
+                        btn.onclick = function() {{
+                            var tentatives = 0;
+                            var maxTentatives = 15; // 15 x 100ms = 1.5s
+                            var intervalle = setInterval(function() {{
+                                tentatives++;
+                                var median = pontMedian();
+                                if (median) {{
+                                    clearInterval(intervalle);
+                                    console.log("[ToukamChat] Téléchargement via le pont Median :", url);
+                                    median.share.downloadFile({{url: url, open: true}});
+                                }} else if (tentatives >= maxTentatives) {{
+                                    clearInterval(intervalle);
+                                    console.log("[ToukamChat] Pont Median indisponible, repli navigateur :", url);
+                                    telechargerNavigateur();
+                                }}
+                            }}, 100);
+                        }};
+                    }})();
+                    </script>
+                """
+                st.components.v1.html(html_bouton_pdf, height=60)
+
+                # Le quota est compté une fois par fiche générée (et non plus au clic précis du
+                # bouton : un bouton HTML pur ne peut pas déclencher Python au clic sans composant
+                # dédié). cle_compteur_pdf évite de compter plusieurs fois la même fiche à chaque
+                # rafraîchissement de la page.
+                cle_compteur_pdf = f"pdf_compte_{len(st.session_state.chat_history)}"
+                if not est_premium and not st.session_state.get(cle_compteur_pdf):
+                    incrementer_quota_anti_triche(email_user, device_id, "pdf_conv")
+                    st.session_state[cle_compteur_pdf] = True
     with col2:
         if not est_premium:
             st.warning("🔒 Option E-mail réservée aux Premium.")
         else:
             if email_user and st.button("📧 Envoyer par e-mail", key="email_global_pdf"):
-                pdf_bytes = generer_pdf(reponse_existante)
-                if envoyer_email(email_user, pdf_bytes, nom_pdf):
+                try:
+                    pdf_bytes = generer_pdf(reponse_existante)
+                except Exception as e:
+                    st.error(f"⚠️ Impossible de générer ce PDF (caractère non pris en charge) : {e}")
+                    pdf_bytes = None
+                if pdf_bytes and envoyer_email(email_user, pdf_bytes, nom_pdf):
                     st.success(f"E-mail envoyé avec succès à {email_user} !")
 
 if not st.session_state.chat_history:
