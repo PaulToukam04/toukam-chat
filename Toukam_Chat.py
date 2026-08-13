@@ -6,6 +6,7 @@ import smtplib
 import random
 import sqlite3
 import uuid
+import base64
 from urllib.parse import quote, unquote
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -342,17 +343,24 @@ _EXPOSANTS = str.maketrans({
     "a": "ᵃ", "b": "ᵇ", "c": "ᶜ", "d": "ᵈ", "e": "ᵉ", "f": "ᶠ", "g": "ᵍ", "h": "ʰ", "i": "ⁱ", "j": "ʲ",
     "k": "ᵏ", "l": "ˡ", "m": "ᵐ", "n": "ⁿ", "o": "ᵒ", "p": "ᵖ", "r": "ʳ", "s": "ˢ", "t": "ᵗ", "u": "ᵘ",
     "v": "ᵛ", "w": "ʷ", "x": "ˣ", "y": "ʸ", "z": "ᶻ",
+    "A": "ᴬ", "B": "ᴮ", "D": "ᴰ", "E": "ᴱ", "G": "ᴳ", "H": "ᴴ", "I": "ᴵ", "J": "ᴶ", "K": "ᴷ",
+    "L": "ᴸ", "M": "ᴹ", "N": "ᴺ", "O": "ᴼ", "P": "ᴾ", "R": "ᴿ", "T": "ᵀ", "U": "ᵁ", "V": "ⱽ", "W": "ᵂ",
 })
 _INDICES = str.maketrans({
     "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄", "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
     "a": "ₐ", "e": "ₑ", "h": "ₕ", "k": "ₖ", "l": "ₗ", "m": "ₘ", "n": "ₙ", "o": "ₒ", "p": "ₚ", "s": "ₛ",
     "t": "ₜ", "u": "ᵤ", "v": "ᵥ", "x": "ₓ",
+    # Unicode ne propose pas d'indices pour toutes les lettres majuscules (ni pour B, C, D, F, G, J,
+    # L, N, Q, R, W, Y, Z en minuscule) : on retombe sur la lettre normale, plus petite visuellement
+    # que rien du tout, plutôt que de laisser le "_" brut illisible dans le texte.
+    "A": "ₐ", "B": "B", "L": "ₗ", "F": "F", "Q": "Q",
 })
 
 
 def convertir_exposants_indices(texte):
     """Transforme la notation 'X^-2' / 'X_1' en vrais exposants/indices Unicode (X⁻², X₁),
-    comme dans un document imprimé classique, au lieu du caret brut qui gêne la lecture."""
+    comme dans un document imprimé classique, au lieu du caret brut qui gêne la lecture.
+    Gère aussi bien les lettres minuscules que majuscules (m_A, q_B, F_L...)."""
     # Exposants fractionnaires du type ^1/2 ou ^-1/2 -> ¹⁄₂, ⁻¹⁄₂
     def _exposant_fraction(m):
         signe = "⁻" if (m.group(1) or m.group(4)) == "-" else ""
@@ -362,50 +370,35 @@ def convertir_exposants_indices(texte):
 
     texte = re.sub(r'\^\((-?)(\d+)/(\d+)\)|\^(-?)(\d+)/(\d+)', _exposant_fraction, texte)
 
-    # Exposants entiers ou à une seule lettre : ^-3, ^12, ^a, ou ^(3) avec parenthèses explicites
+    # Exposants entiers ou à une seule lettre (majuscule ou minuscule) : ^-3, ^12, ^a, ^A, ou ^(3)
     def _exposant_simple(m):
         return (m.group(1) or m.group(2)).translate(_EXPOSANTS)
 
-    texte = re.sub(r'\^\((-?\d+|[a-z])\)|\^(-?\d+|[a-z])', _exposant_simple, texte)
+    texte = re.sub(r'\^\((-?\d+|[a-zA-Z])\)|\^(-?\d+|[a-zA-Z])', _exposant_simple, texte)
 
-    # Indices : m_1, Q_v, m_2 ... ou m_(1) avec parenthèses explicites
+    # Indices : m_1, Q_v, m_A, F_L ... (majuscule ou minuscule) ou m_(1) avec parenthèses explicites
     def _indice_simple(m):
         return (m.group(1) or m.group(2)).translate(_INDICES)
 
-    texte = re.sub(r'_\((\d+|[a-z])\)|_(\d+|[a-z])', _indice_simple, texte)
+    texte = re.sub(r'_\((\d+|[a-zA-Z])\)|_(\d+|[a-zA-Z])', _indice_simple, texte)
     return texte
 
 
 def nettoyer_pour_affichage(texte):
-    """Nettoie la réponse brute de l'IA pour un affichage lisible DANS LE CHAT (écran), en
-    convertissant les indices/exposants et le LaTeX en vrai Unicode -- contrairement à
-    nettoyer_pour_pdf(), on garde le Markdown (gras, listes...) car st.write/st.markdown
-    sait déjà le restituer correctement à l'écran."""
+    """Prépare la réponse brute de l'IA pour l'affichage DANS LE CHAT (écran).
+    CORRECTIF LISIBILITÉ : au lieu de reconstruire les fractions/exposants "à la main" en
+    Unicode (approximatif, et qui échouait sur les indices en majuscule comme m_A, q_B, F_L),
+    on laisse Streamlit faire le rendu mathématique natif : st.markdown / st.write savent
+    afficher du vrai LaTeX (fractions empilées, exposants, indices...) via KaTeX dès lors que
+    la formule est entourée de $...$ (en ligne) ou $$...$$ (bloc), exactement comme dans un
+    document. On se contente donc de nettoyer ce qui n'a rien à voir avec les maths."""
     if not texte:
         return texte
-    texte = texte.replace('$$', '').replace('$', '')
-    remplacements = {
-        r'\times': '×', r'\cdot': '·', r'\pi': 'π', r'\sqrt': '√',
-        r'\implies': '⇒', r'\Rightarrow': '⇒', r'\rightarrow': '→', r'\to': '→',
-        r'\leq': '≤', r'\geq': '≥', r'\neq': '≠', r'\approx': '≈',
-        r'\alpha': 'α', r'\beta': 'β', r'\gamma': 'γ', r'\Theta': 'Θ', r'\theta': 'θ',
-        r'\ell': 'ℓ', r'\infty': '∞', r'\pm': '±', r'\Delta': 'Δ', r'\omega': 'ω',
-        r'\eta': 'η', r'\mu': 'μ', r'\nu': 'ν', r'\lambda': 'λ', r'\sigma': 'σ',
-        r'\rho': 'ρ', r'\phi': 'φ', r'\tau': 'τ',
-        r'\text': '', r'\mathbf': '', r'\left': '', r'\right': '',
-    }
-    for latex, symbole in remplacements.items():
-        texte = texte.replace(latex, symbole)
-    # \frac{a}{b} -> "a⁄b" lisible en ligne (pas de vraie barre horizontale possible en Markdown)
-    texte = re.sub(
-        r'\\frac\{([^{}]*)\}\{([^{}]*)\}',
-        lambda m: f"{m.group(1).strip()}⁄{m.group(2).strip()}",
-        texte
-    )
-    texte = re.sub(r'\\[a-zA-Z]+', '', texte)
-    texte = texte.replace('{', '').replace('}', '')
-    texte = convertir_exposants_indices(texte)
-    return texte
+    # Titres Markdown "### Titre" -> on les laisse tels quels, st.markdown les rend déjà bien.
+    # Émojis/pictogrammes qui posent parfois problème restent gérés ailleurs si besoin.
+    # On ne touche PLUS à $, \frac, ^, _, etc. : c'est justement ce qui permet à KaTeX
+    # de dessiner une vraie fraction avec une barre, un vrai exposant, un vrai indice.
+    return texte.strip()
 
 
 # --- RENDU DES FRACTIONS EN LIGNE (dans le texte, sans retour à la ligne forcé) ---
@@ -807,7 +800,10 @@ pour tout ceux qui veulent partarger l'application, voici le lien de l'applicati
 - En mode 'Planning intelligent', planifie l'organisation des révisions en utilisant la méthode de la répétition espacée.
 - IMPORTANT (pour nommer le futur PDF) : sur la toute première ligne de ta réponse, et uniquement sur celle-ci, indique un titre court (3 à 8 mots, sans ponctuation finale) résumant le sujet traité, 
 sous la forme exacte : [TITRE: titre ici]. Exemple : [TITRE: Forces et Champs (Tle C)]. Passe ensuite une ligne, puis rédige normalement ta réponse complète juste en dessous. N'oublie jamais cette première ligne,
-même pour une question très courte."""
+même pour une question très courte.
+- FORMAT DES FORMULES (très important pour la lisibilité) : écris TOUJOURS chaque formule ou expression mathématique en LaTeX, entourée de symboles dollar : $...$ pour une formule au fil du texte,
+$$...$$ pour une formule isolée sur sa propre ligne. Utilise systématiquement \\frac{numérateur}{dénominateur} pour les fractions (jamais de simple "/"), ^{...} pour les exposants et _{...} pour les indices,
+même quand l'indice est une lettre majuscule (par exemple m_{A}, q_{B}, F_{L}, et non m_A sans accolades). N'écris jamais de formule en texte brut hors des délimiteurs $...$."""
 
 _MOTIF_TITRE_PDF = re.compile(r'^\s*\[TITRE:\s*(.+?)\]\s*\n+', re.IGNORECASE)
 
@@ -839,7 +835,7 @@ for m in st.session_state.chat_history:
     avatar_actuel = AVATAR_ETUDIANT if m["role"] == "user" else AVATAR_TOUKAM
     with st.chat_message(m["role"], avatar=avatar_actuel):
         contenu_affiche = nettoyer_pour_affichage(m["content"]) if m["role"] == "assistant" else m["content"]
-        st.write(contenu_affiche)
+        st.markdown(contenu_affiche)
 
 st.write("---")
 tab_text, tab_photo, tab_camera, tab_pdf, tab_audio = st.tabs(["📝 Texte", "🖼️ Galerie", "📸 Appareil Photo", "📂 Document PDF", "🎙️ Note Vocale"])
@@ -1003,50 +999,73 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
 
             erreur_pdf = None
             if cle_cache_pdf in st.session_state.pdf_cache:
-                nom_fichier_statique = st.session_state.pdf_cache[cle_cache_pdf]
+                pdf_bytes = st.session_state.pdf_cache[cle_cache_pdf]
             else:
                 try:
                     pdf_bytes = generer_pdf(reponse_existante)
-                    nom_fichier_statique = sauvegarder_pdf_statique(pdf_bytes, nom_pdf)
-                    st.session_state.pdf_cache[cle_cache_pdf] = nom_fichier_statique
+                    st.session_state.pdf_cache[cle_cache_pdf] = pdf_bytes
                 except Exception as e:
                     # Un caractère imprévu ne doit jamais faire planter toute l'application :
                     # on affiche juste une erreur et on n'affiche pas le bouton pour cette fiche.
                     erreur_pdf = str(e)
-                    nom_fichier_statique = None
+                    pdf_bytes = None
 
             if erreur_pdf:
                 st.error(f"⚠️ Impossible de générer ce PDF (caractère non pris en charge) : {erreur_pdf}")
             else:
-                url_relative = f"app/static/{nom_fichier_statique}"
+                # CORRECTIF TÉLÉCHARGEMENT DIRECT (sans passer par une URL/le réseau) :
+                # le PDF est encodé en base64 et embarqué DIRECTEMENT dans le bouton HTML. Il n'y a
+                # donc plus de fetch réseau ni de dépendance à un dossier static/ servi par le
+                # serveur (qui exigeait enableStaticServing=true et échouait sinon -> bouton mort).
+                #  - Sur PC / navigateur mobile classique : on reconstruit un vrai fichier binaire
+                #    (Blob) à partir du base64 et on déclenche le téléchargement natif du navigateur
+                #    (URL.createObjectURL) -> le fichier atterrit directement dans le dossier
+                #    Téléchargements de l'appareil.
+                #  - Dans l'app Android (WebView Median) : on utilise le pont natif
+                #    median.share.downloadFile en lui donnant directement les données en base64
+                #    (data URI), donc sans passer par une URL http distante -> le fichier est écrit
+                #    directement dans le stockage de l'appareil.
+                pdf_base64 = base64.b64encode(pdf_bytes).decode("ascii")
 
-                # CORRECTIF IMPORTANT : st.markdown(unsafe_allow_html=True) n'exécute JAMAIS les
-                # balises <script> qu'il contient (limitation du DOM : un script inséré via innerHTML
-                # ne se lance pas tout seul). Le bouton s'affichait donc, mais aucun clic n'était
-                # jamais réellement branché dessus -- ni sur PC, ni sur Android. On utilise à la place
-                # st.components.v1.html, qui rend le contenu dans un vrai <iframe> où le JS s'exécute
-                # normalement. Comme l'iframe est une fenêtre à part, on vérifie le pont Median à la
-                # fois dans la fenêtre de l'iframe ET dans la fenêtre parente (celle de l'app Median).
                 html_bouton_pdf = f"""
                     <button id="btn_pdf" style="
                         background-color:#2E8B57; color:white; border:none; padding:0.55em 1em;
                         border-radius:8px; cursor:pointer; width:100%; font-size:1em; font-family:inherit;">
                         💾 Télécharger en PDF
                     </button>
+                    <div id="msg_pdf" style="font-size:0.8em; color:#888; margin-top:6px;"></div>
                     <script>
                     (function() {{
-                        var url = new URL("{url_relative}", window.parent.location.href).href;
+                        var base64Pdf = "{pdf_base64}";
+                        var nomFichier = {nom_pdf!r};
+                        var dataUri = "data:application/pdf;base64," + base64Pdf;
                         var btn = document.getElementById("btn_pdf");
+                        var msg = document.getElementById("msg_pdf");
                         if (!btn) {{ return; }}
 
+                        function base64VersBlob(base64, mime) {{
+                            var octets = atob(base64);
+                            var tampon = new Uint8Array(octets.length);
+                            for (var i = 0; i < octets.length; i++) {{
+                                tampon[i] = octets.charCodeAt(i);
+                            }}
+                            return new Blob([tampon], {{ type: mime }});
+                        }}
+
                         function telechargerNavigateur() {{
-                            var a = document.createElement("a");
-                            a.href = url;
-                            a.download = "{nom_pdf}";
-                            a.target = "_blank";
-                            document.body.appendChild(a);
-                            a.click();
-                            document.body.removeChild(a);
+                            try {{
+                                var blob = base64VersBlob(base64Pdf, "application/pdf");
+                                var url = URL.createObjectURL(blob);
+                                var a = document.createElement("a");
+                                a.href = url;
+                                a.download = nomFichier;
+                                document.body.appendChild(a);
+                                a.click();
+                                document.body.removeChild(a);
+                                setTimeout(function() {{ URL.revokeObjectURL(url); }}, 30000);
+                            }} catch (e) {{
+                                msg.textContent = "Erreur de téléchargement : " + e;
+                            }}
                         }}
 
                         function pontMedian() {{
@@ -1063,26 +1082,19 @@ if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] =
                         }}
 
                         btn.onclick = function() {{
-                            var tentatives = 0;
-                            var maxTentatives = 15; // 15 x 100ms = 1.5s
-                            var intervalle = setInterval(function() {{
-                                tentatives++;
-                                var median = pontMedian();
-                                if (median) {{
-                                    clearInterval(intervalle);
-                                    console.log("[ToukamChat] Téléchargement via le pont Median :", url);
-                                    median.share.downloadFile({{url: url, open: true}});
-                                }} else if (tentatives >= maxTentatives) {{
-                                    clearInterval(intervalle);
-                                    console.log("[ToukamChat] Pont Median indisponible, repli navigateur :", url);
-                                    telechargerNavigateur();
-                                }}
-                            }}, 100);
+                            var median = pontMedian();
+                            if (median) {{
+                                // Données envoyées directement au pont natif Median, sans requête
+                                // réseau : le fichier est écrit dans le stockage de l'appareil Android.
+                                median.share.downloadFile({{url: dataUri, filename: nomFichier, open: true}});
+                            }} else {{
+                                telechargerNavigateur();
+                            }}
                         }};
                     }})();
                     </script>
                 """
-                st.components.v1.html(html_bouton_pdf, height=60)
+                st.components.v1.html(html_bouton_pdf, height=70)
 
                 # Le quota est compté une fois par fiche générée (et non plus au clic précis du
                 # bouton : un bouton HTML pur ne peut pas déclencher Python au clic sans composant
